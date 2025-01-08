@@ -1,7 +1,7 @@
 import logging
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageEnhance
 from functools import lru_cache
 from functools import partial
 from itertools import repeat
@@ -14,8 +14,7 @@ from tqdm import tqdm
 import os
 import torchvision.transforms as transforms
 import random
-from torchvision.transforms import functional as F
-from torchvision.transforms import InterpolationMode
+import torch.nn.functional as F
 
 import vk4extract
 
@@ -48,7 +47,7 @@ def load_image(filename):
         print(f"Error loading image {filename}: {e}")
         return None
 
-def add_heightMap(filename, torch_img, scale):
+def load_height(filename):
     ext = splitext(filename)[1]
     if ext == '.vk4':
         with open(filename, 'rb') as in_file:
@@ -61,28 +60,12 @@ def add_heightMap(filename, torch_img, scale):
         height_matrix = np.reshape(height_data, (height, width))
     elif ext == '.npy':
         height_matrix = np.load(filename)
-        
-    # Normalize
-    height_matrix = (height_matrix - height_matrix.min() ) / (height_matrix.max() - height_matrix.min()) *255.0
 
-    if scale != 1:
-        height_img = Image.fromarray(height_matrix)
-        w, h = height_img.size
-        newW, newH = int(scale * w), int(scale * h)
-        height_img = height_img.resize((newW, newH), Image.BICUBIC)
-        height_matrix = np.asarray(height_img)
+    height_img = Image.fromarray(height_matrix)  
+    return height_img
 
-    # Convert the height matrix to a PyTorch tensor
-    height_tensor = torch.tensor(height_matrix, dtype=torch.float32).unsqueeze(0)
 
-    # Normalize between 0-1
-    height_tensor = height_tensor/ 255.0
-
-    # Concatenate the height tensor with the torch_img tensor
-    torch_img = torch.cat((torch_img, height_tensor), dim=0)    
-    return torch_img
-
-def add_lightMap(filename, torch_img, scale):
+def load_light(filename):
     ext = splitext(filename)[1]
     if ext == '.vk4':
         with open(filename, 'rb') as in_file:
@@ -95,36 +78,22 @@ def add_lightMap(filename, torch_img, scale):
         light_matrix = np.reshape(light_data, (height, width))
     elif ext == '.npy':
         light_matrix = np.load(filename)
-    # Normalize
-    light_matrix = (light_matrix - light_matrix.min() ) / (light_matrix.max() - light_matrix.min()) *255.0
-
-    if scale != 1:
-        light_img = Image.fromarray(light_matrix)
-        w, h = light_img.size
-        newW, newH = int(scale * w), int(scale * h)
-        light_img = light_img.resize((newW, newH), Image.BICUBIC)
-        light_matrix = np.asarray(light_img)
-    
-    # Convert the light matrix to a PyTorch tensor
-    light_tensor = torch.tensor(light_matrix, dtype=torch.float32).unsqueeze(0)
-
-    # Normalize between 0-1
-    light_tensor = light_tensor/ 255.0
 
     # Concatenate the height tensor with the torch_img tensor
-    torch_img = torch.cat((torch_img, light_tensor), dim=0)    
-    return torch_img
+    light_img = Image.fromarray(light_matrix)    
+    return light_img
 
 
 class BasicDataset(Dataset):
-    def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = '', mode = 'train'):
+    def __init__(self, images_dir: str, mask_dir: str, size: 256, mask_suffix: str = '', mode = 'train', height=False, light=False):
         self.images_dir = Path(images_dir)
         self.mask_dir = Path(mask_dir)
-        assert 0 < scale <= 1, 'Scale must be between 0 and 1'
-        self.scale = scale
+
+        self.size = size
         self.mode = mode
+        self.height = height
+        self.light = light
         self.mask_suffix = mask_suffix
-        
 
         # Recursively find all image files, excluding specified directories
         self.image_files = [file for file in self.images_dir.rglob('*.*') if isfile(file)]
@@ -154,19 +123,20 @@ class BasicDataset(Dataset):
         return len(self.ids)
 
     @staticmethod
-    def preprocess(pil_img, scale, is_mask):
-        w, h = pil_img.size
-        newW, newH = int(scale * w), int(scale * h)
+    def preprocess(pil_img, size, is_mask):
+        newH, newW = size
         assert newW > 0 and newH > 0, 'Scale is too small, resized images would have no pixel'
         pil_img = pil_img.resize((newW, newH), resample=Image.NEAREST if is_mask else Image.BICUBIC)
         img = np.asarray(pil_img)
         # Convert airVoids to white and aggregates to gray
         if is_mask:
             mask = img.copy()
-            mask[(mask > 0) & (mask <= 120)] = 1
-            mask[mask > 120] = 2
+            mask[(mask > 0) & (mask <= 128)] = 1
+            mask[mask > 128] = 2
+            # mask[mask == 128] = 1
+            # mask[mask == 255] = 2
 
-            return mask    
+            return mask
         else:
 
             # Normalize
@@ -182,6 +152,23 @@ class BasicDataset(Dataset):
             if (img > 1).any():
                 img = img / 255.0
             return img
+        
+    @staticmethod    
+    def preprocess_additional(img, size):
+        img_matrix = np.array(img)
+        img_matrix = (img_matrix - img_matrix.min() ) / (img_matrix.max() - img_matrix.min()) *255.0
+        img_new = Image.fromarray(img_matrix)
+
+        newH, newW = size
+        img_new = img_new.resize((newW, newH), Image.BICUBIC)
+        img_matrix = np.asarray(img_new)
+        # Convert the height matrix to a PyTorch tensor
+        img_tensor = torch.tensor(img_matrix, dtype=torch.float32).unsqueeze(0)
+
+        # Normalize between 0-1
+        img_tensor = img_tensor/ 255.0
+        
+        return img_tensor
 
     def __getitem__(self, idx):
         name = self.ids[idx]
@@ -194,47 +181,109 @@ class BasicDataset(Dataset):
         mask = load_image(mask_file[0])
         img = load_image(img_file[0])
 
+        # Crop 20 pixels to fit the masks
+        if self.mode == 'val':
+            img = img.crop((20, 20, img.size[0] - 20, img.size[1] - 20))
+        #mask = mask.crop((20, 20, mask.size[0] - 20, mask.size[1] - 20))
+
+        if self.height:
+            height_img = load_height(img_file[0])
+            if self.mode == 'val':
+                height_img = height_img.crop((20, 20, height_img.size[0] - 20, height_img.size[1] - 20))
+
+        if self.light:
+            light_img = load_light(img_file[0])
+            light_img = light_img.crop((20, 20, light_img.size[0] - 20, light_img.size[1] - 20))
+
         assert img.size == mask.size, \
             f'Image and mask {name} should be the same size, but are {img.size} and {mask.size}'
 
-        img = self.preprocess(img, self.scale, is_mask=False)
-        mask = self.preprocess(mask, self.scale, is_mask=True)
+        
+        if self.mode == 'train':
+            if random.random() > 0.5:
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
+                if self.height:
+                    height_img = height_img.transpose(Image.FLIP_LEFT_RIGHT)
+                if self.light:
+                    light_img = light_img.transpose(Image.FLIP_LEFT_RIGHT)
 
-        img = torch.as_tensor(img.copy()).float()
-        mask = torch.as_tensor(mask.copy()).long()
+            # Data augmentation: Random vertical flip
+            if random.random() > 0.5:
+                img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                mask = mask.transpose(Image.FLIP_TOP_BOTTOM)
+                if self.height:
+                    height_img = height_img.transpose(Image.FLIP_TOP_BOTTOM)
+                if self.light:
+                    light_img = light_img.transpose(Image.FLIP_TOP_BOTTOM)
 
-        # Augmentations
-        # if self.mode == 'train':
-        #     # Random Flips
-        #     if random.random() > 0.25:
-        #         img = F.hflip(img)
-        #         mask = F.hflip(mask)
+            # # Data augmentation: Random crop with varying sizes between 0.5 and 1.0 of the original image
+            # scale = random.uniform(0.5, 1.0)
+            # width, height = img.size
+            # new_width = int(scale * width)
+            # new_height = int(scale * height)
+
+            # # Ensure the crop size is not larger than the image size
+            # if new_width < width or new_height < height:
+            #     # Randomly select the top-left corner for cropping
+            #     left = random.randint(0, width - new_width)
+            #     top = random.randint(0, height - new_height)
+            #     right = left + new_width
+            #     bottom = top + new_height
+
+            #     # Crop both image and mask
+            #     img = img.crop((left, top, right, bottom))
+            #     mask = mask.crop((left, top, right, bottom))
+            #     if self.height:
+            #         height_img = height_img.crop((left, top, right, bottom))
+            #     if self.light:
+            #         light_img = light_img.crop((left, top, right, bottom))
+                
             
-        #     if random.random() > 0.25:
-        #         img = F.vflip(img)
-        #         mask = F.vflip(mask)
-            
-        #     # Slight Color Changes
-        #     if random.random() > 0.1:
-        #         img = F.adjust_brightness(img, brightness_factor=random.uniform(0.9, 1.1))
-        #     if random.random() > 0.1:
-        #         img = F.adjust_contrast(img, contrast_factor=random.uniform(0.9, 1.1))
-        #     if random.random() > 0.1:
-        #         img = F.adjust_saturation(img, saturation_factor=random.uniform(0.9, 1.1))
-        #     if random.random() > 0.1:
-        #         img = F.adjust_hue(img, hue_factor=random.uniform(-0.05, 0.05))
-            
-        #     # Apply Gaussian Blur
-        #     if random.random() > 0.1:
-        #         kernel_size = random.choice([3, 5])  # Choosing between different kernel sizes for blur effect
-        #         sigma = random.uniform(0.1, 2.0)  # Standard deviation for Gaussian kernel
-        #         img = F.gaussian_blur(img, kernel_size=kernel_size, sigma=sigma)
+            # Adjust brightness
+            if random.random() < 0.1:
+                enhancer = ImageEnhance.Brightness(img)
+                factor = random.uniform(0.95, 1.05)
+                img = enhancer.enhance(factor)
 
-        # Add height Map
-        img = add_heightMap(img_file[0], img, self.scale)
-        img = add_lightMap(img_file[0], img, self.scale)       
+            # Adjust contrast
+            if random.random() < 0.1:
+                enhancer = ImageEnhance.Contrast(img)
+                factor = random.uniform(0.95, 1.05)
+                img = enhancer.enhance(factor)
 
-        return {
+            # Adjust color (saturation)
+            if random.random() < 0.1:
+                enhancer = ImageEnhance.Color(img)
+                factor = random.uniform(0.95, 1.05)
+                img = enhancer.enhance(factor)
+
+            # Adjust sharpness
+            if random.random() < 0.1:
+                enhancer = ImageEnhance.Sharpness(img)
+                factor = random.uniform(0.95, 1.05)
+                img = enhancer.enhance(factor)
+
+
+        img = self.preprocess(img, self.size, is_mask=False)
+        mask = self.preprocess(mask, self.size, is_mask=True)
+        
+        img = torch.as_tensor(img).float()
+        mask = torch.as_tensor(mask).long()
+
+        # Normalize and add additional information
+        if self.height:
+            height_tensor = self.preprocess_additional(height_img, self.size)
+            img = torch.cat((img, height_tensor), dim=0)
+
+        if self.light:
+            light_tensor = self.preprocess_additional(light_img, self.size)
+            img = torch.cat((img, light_tensor), dim=0)
+
+
+        data = {
             'image': img.float().contiguous(),
             'mask': mask.contiguous()
         }
+
+        return data
