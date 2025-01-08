@@ -1,4 +1,5 @@
 import argparse
+from typing import Union, Tuple
 import logging
 import os
 import random
@@ -22,11 +23,13 @@ from utils.dice_score import dice_loss
 from utils.iou_score import iou_loss
 from utils.focal_loss import focal_loss
 
+from unet_3.models.UNet_3Plus import UNet_3Plus
+
 train_img = Path('/storage/group/building_materials/raw/CONFOCAL_SAMPLES/')
-train_mask = Path('./data/new_data/')
-val_img = Path('/storage/group/building_materials/01032024/SUBSET_1_data/')
-val_mask = Path('./data/masks/original/')
-dir_checkpoint = Path('./checkpoints/10k_light_height/')
+train_mask = Path('/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/ensemble_h_l_99')
+val_img = Path('/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/domain_adaptation/vk4/general')
+val_mask = Path('/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/10X_clean/Generalization_set')
+dir_checkpoint = Path('./checkpoints/New/99_color')
 
 
 def train_model(
@@ -37,18 +40,18 @@ def train_model(
         learning_rate: float = 1e-5,
         val_percent: float = 0.1,
         save_checkpoint: bool = True,
-        img_scale: float = 0.5,
+        img_size: int = 256,
         amp: bool = False,
-        weight_decay: float = 1e-7,
+        weight_decay: float = 1e-8,
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
 ):
     # 0.5 Set a fixed seed for reproducibility
-    np.random.seed(42)
+    # np.random.seed(42)
 
     # 1. Create dataset
-    dataset_train = BasicDataset(train_img, train_mask, img_scale, mode = 'train')
-    dataset_val = BasicDataset(val_img, val_mask, img_scale, mode = 'val')
+    dataset_train = BasicDataset(train_img, train_mask, img_size, mode = 'train')
+    dataset_val = BasicDataset(val_img, val_mask, img_size, mode = 'val')
 
     # # 2. Split into train / validation partitions
     # n_val = int(len(dataset_train) * val_percent)
@@ -68,7 +71,7 @@ def train_model(
     # val_sampler = SequentialSampler(val_idx)
 
     # 3. Create data loaders
-    loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
+    loader_args = dict(batch_size=batch_size, num_workers=8, pin_memory=True)
     train_loader = DataLoader(dataset_train, shuffle = True, **loader_args)
     val_loader = DataLoader(dataset_val, shuffle = False, drop_last=True, **loader_args)
 
@@ -78,7 +81,7 @@ def train_model(
     experiment = wandb.init(project='U-Net', entity  ='building_materials_viktor', name = "Run")
     experiment.config.update(
         dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-             val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale, amp=amp)
+             val_percent=val_percent, save_checkpoint=save_checkpoint, img_size=img_size, amp=amp)
     )
 
     logging.info(f'''Starting training:
@@ -89,7 +92,7 @@ def train_model(
         Validation size: {n_val}
         Checkpoints:     {save_checkpoint}
         Device:          {device.type}
-        Images scaling:  {img_scale}
+        Images size:     {img_size}
         Mixed Precision: {amp}
     ''')
 
@@ -97,12 +100,13 @@ def train_model(
     optimizer = optim.Adam(model.parameters(),
                               lr=learning_rate, weight_decay=weight_decay, betas=(0.9, 0.999), eps=1e-8, foreach = True)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=learning_rate, pct_start = 0.01, 
-                                    total_steps= (epochs * n_train // batch_size) + n_train, final_div_factor = 1e2)
+                                    total_steps= (epochs * n_train // batch_size) + 500, final_div_factor = 1e3)
 
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
     global_index = 0
+    class_weights = torch.tensor([0.4782, 0.2792, 2.2426])
 
     # 5. Begin training
     for epoch in range(1, epochs + 1):
@@ -122,18 +126,19 @@ def train_model(
 
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
                     masks_pred = model(images)
+                    # masks_pred_msssim = model(images)[1:]
                     if model.n_classes == 1:
-                        loss = criterion(masks_pred.squeeze(1), true_masks.float())
+                        #loss = criterion(masks_pred.squeeze(1), true_masks.float())
+                        loss = focal_loss(masks_pred.squeeze(1), true_masks, alpha=0.25, gamma=2, reduction='mean')
                         loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
-                        loss += focal_loss(masks_pred.squeeze(1), true_masks, alpha=1, gamma=2, reduction='mean')
                     else:
-                        loss = criterion(masks_pred, true_masks.squeeze(1))
+                        #loss = criterion(masks_pred, true_masks.squeeze(1))
+                        loss = focal_loss(masks_pred, true_masks, alpha=class_weights, gamma=3, reduction='mean')
                         loss += dice_loss(
                             F.softmax(masks_pred, dim=1).float(),
                             F.one_hot(true_masks.squeeze(1), model.n_classes).permute(0, 3, 1, 2).float(),
                             multiclass=True
                         )
-                        loss += focal_loss(masks_pred, true_masks, alpha=1, gamma=2, reduction='mean')
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
@@ -156,16 +161,16 @@ def train_model(
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
                 # Evaluation round
-                division_step = (n_train // (5 * batch_size))
+                division_step = (n_train // (batch_size))
                 if division_step > 0:
                     if global_step % division_step == 0:
-                        histograms = {}
-                        for tag, value in model.named_parameters():
-                            tag = tag.replace('/', '.')
-                            if not (torch.isinf(value) | torch.isnan(value)).any():
-                                histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
-                            if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
-                                histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
+                        # histograms = {}
+                        # for tag, value in model.named_parameters():
+                        #     tag = tag.replace('/', '.')
+                        #     if not (torch.isinf(value) | torch.isnan(value)).any():
+                        #         histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
+                        #     if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
+                        #         histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
                         val_dice, val_IoU = evaluate(model, val_loader, device, amp, global_index)
                         global_index = (global_index + 1) % (len(val_loader) * batch_size)
@@ -188,9 +193,9 @@ def train_model(
                             },
                             'masks': {
                                 'true': wandb.Image(true_masks[0].float().cpu()),
-                                'pred': wandb.Image(pred[0].float().squeeze().cpu()),
+                                'pred': wandb.Image(pred[0].float().cpu()),
                             },
-                            **histograms
+                            # **histograms
                         })
 
         if save_checkpoint:
@@ -199,6 +204,19 @@ def train_model(
             torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
 
+def parse_size(value: str) -> Union[int, Tuple[int, int]]:
+    """
+    Parse the `--size` argument to allow an integer or a tuple (width, height).
+
+    """
+    try:
+        if ',' in value:  # If the value contains a comma, treat it as a tuple
+            width, height = map(int, value.split(','))
+            return width, height
+        else:  # Otherwise, parse it as a single integer
+            return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("Size must be an int or a tuple of two ints, e.g., '256' or '256,128'.")
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
@@ -207,7 +225,7 @@ def get_args():
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
-    parser.add_argument('--scale', '-s', type=float, default=0.5, help='Downscaling factor of the images')
+    parser.add_argument('--size', '-s', type=parse_size, default=0.5, help='Downscaling factor of the images')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
@@ -227,7 +245,9 @@ if __name__ == '__main__':
     # Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
-    model = UNet(n_channels=5, n_classes=args.classes, bilinear=args.bilinear)
+
+    model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    #model = UNet_3Plus(in_channels=5, n_classes = args.classes)
     model = model.to(memory_format=torch.channels_last)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -235,10 +255,12 @@ if __name__ == '__main__':
                  f'\t{total_params} parameters\n'
                  f'\t{model.n_channels} input channels\n'
                  f'\t{model.n_classes} output channels (classes)\n'
-                 f'\t{"Bilinear" if model.bilinear else "Transposed conv"} upscaling')
+                 #f'\t{"Bilinear" if model.bilinear else "Transposed conv"} upscaling'
+                 )
 
     if args.load:
         state_dict = torch.load(args.load, map_location=device)
+        # del state_dict['mask_values']
         model.load_state_dict(state_dict)
         logging.info(f'Model loaded from {args.load}')
 
@@ -250,7 +272,7 @@ if __name__ == '__main__':
             batch_size=args.batch_size,
             learning_rate=args.lr,
             device=device,
-            img_scale=args.scale,
+            img_size=args.size,
             val_percent=args.val / 100,
             amp=args.amp
         )
@@ -266,7 +288,7 @@ if __name__ == '__main__':
             batch_size=args.batch_size,
             learning_rate=args.lr,
             device=device,
-            img_scale=args.scale,
+            img_size=args.size,
             val_percent=args.val / 100,
             amp=args.amp
         )

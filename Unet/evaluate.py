@@ -6,6 +6,7 @@ import random
 
 from utils.dice_score import multiclass_dice_coeff, dice_coeff
 from utils.iou_score import iou_score
+from torchvision.transforms import Resize
 
 
 @torch.inference_mode()
@@ -14,6 +15,7 @@ def evaluate(net, dataloader, device, amp, global_index):
     num_val_batches = len(dataloader)
     dice_score = 0
     iou_score_total = 0
+    iou_per_class = torch.zeros(net.n_classes, device='cuda' if torch.cuda.is_available() else 'cpu')
 
     # iterate over the validation set
     with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
@@ -42,8 +44,12 @@ def evaluate(net, dataloader, device, amp, global_index):
                 mask_pred_hot = F.one_hot(mask_pred.argmax(dim=1), net.n_classes).permute(0, 3, 1, 2).float()
                 # compute the Dice score, ignoring background
                 dice_score += multiclass_dice_coeff(mask_pred_hot[:, 1:], mask_true_hot[:, 1:], reduce_batch_first=False)
-                # compute the IOU score
-                iou_score_total += iou_score(mask_pred.argmax(dim=1), mask_true.squeeze(1), net.n_classes)
+                # compute the IOU score (both mean and per class)
+                batch_iou_score, batch_iou_per_class = iou_score(mask_pred.argmax(dim=1), mask_true.squeeze(1), net.n_classes)
+
+                iou_score_total += batch_iou_score
+                iou_class_tensor = torch.tensor(batch_iou_per_class, device=iou_per_class.device)
+                iou_per_class += iou_class_tensor
 
             # Calculate batch start and end indices
             batch_start_idx = cumulative_image_count
@@ -68,6 +74,11 @@ def evaluate(net, dataloader, device, amp, global_index):
                     f"val/mask_pred": wandb.Image(mask_p, caption="Predicted Mask")
                 })
             cumulative_image_count = batch_end_idx
+
+    avg_iou_per_class = [score / max(num_val_batches, 1) for score in iou_per_class]
+    wandb.log({
+         **{f"iou_class_{i}": iou.item() for i, iou in enumerate(avg_iou_per_class)}
+    })
 
     net.train()
     return dice_score / max(num_val_batches, 1), iou_score_total / max(num_val_batches, 1)

@@ -24,7 +24,10 @@ def calculate_agreement(*masks):
         for j in range(mask_shape[1]):
             votes = [mask[i, j] for mask in masks]
             vote_counts = {vote: votes.count(vote) for vote in set(votes)}
-            max_count = max(vote_counts.values())
+            if len(vote_counts) == 3:
+                max_count = 0
+            else:
+                max_count = max(vote_counts.values())
             majority_candidates = [vote for vote, count in vote_counts.items() if count == max_count]
 
             if len(majority_candidates) == 1:
@@ -42,21 +45,32 @@ def overall_agreement_score(agreement):
     return np.mean(agreement)
 
 def main(folder_paths, dest_folder):
-    assert len(folder_paths) == 5, "Exactly 7 folders must be provided"
+    assert len(folder_paths) == 5, "Exactly 5 folders must be provided"
 
     # Create the destination folder if it doesn't exist
     os.makedirs(dest_folder, exist_ok=True)
 
-    # Get the set of common mask files present in all seven folders
-    common_files = set(os.listdir(folder_paths[0])).intersection(*[set(os.listdir(folder)) for folder in folder_paths[1:]])
+    # Collect relative paths of all image files in each folder
+    relative_image_paths_list = []
+    for folder in folder_paths:
+        relative_image_paths = set()
+        for dirpath, _, filenames in os.walk(folder):
+            for filename in filenames:
+                if filename.endswith('.png'):  # Adjust the extension if needed
+                    abs_path = os.path.join(dirpath, filename)
+                    rel_path = os.path.relpath(abs_path, folder)
+                    relative_image_paths.add(rel_path)
+        relative_image_paths_list.append(relative_image_paths)
 
-    if not common_files:
-        print("No common mask files found in all seven folders.")
+    # Find the intersection of relative image paths across all five folders
+    common_relative_paths = set.intersection(*relative_image_paths_list)
+
+    if not common_relative_paths:
+        print("No common image files found in all five folders.")
         return
 
-
-    for filename in common_files:
-        mask_paths = [os.path.join(folder, filename) for folder in folder_paths]
+    for rel_path in common_relative_paths:
+        mask_paths = [os.path.join(folder, rel_path) for folder in folder_paths]
 
         # Load the masks
         masks = [load_mask(path) for path in mask_paths]
@@ -68,24 +82,29 @@ def main(folder_paths, dest_folder):
         score = overall_agreement_score(agreement_map)
 
         # Output the results
-        print(f"File: {filename}, Overall Agreement Score: {score:.2f}")
+        print(f"File: {rel_path}, Overall Agreement Score: {score:.2f}")
 
-        # Save
+        # Save if the score is above the threshold
         if score > 0.97:
+            # Ensure the directory exists in dest_folder
+            output_path = os.path.join(dest_folder, rel_path)
+            output_dir = os.path.dirname(output_path)
+            os.makedirs(output_dir, exist_ok=True)
+
             # Save the majority voting map as an image
             majority_vote_image = Image.fromarray(majority_vote)
-            majority_vote_image_path = os.path.join(dest_folder, f"{filename}")
-            majority_vote_image.save(majority_vote_image_path)
-            print(f"Majority vote map saved as '{majority_vote_image_path}'")
-
+            majority_vote_image.save(output_path)
+            print(f"Majority vote map saved as '{output_path}'")
 
 if __name__ == "__main__":
-    # Example usage with three mask file paths
-    mask_paths = ["/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/focal/M1S1/M1S1_1_P_U1-GR2020", 
-    "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/height/M1S1/M1S1_1_P_U1-GR2020", 
-    "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/height_focal/M1S1/M1S1_1_P_U1-GR2020",
-    "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/light_height/M1S1/M1S1_1_P_U1-GR2020",
-    "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/wd/M1S1/M1S1_1_P_U1-GR2020"  ]
+    # Example usage with five mask folder paths
+    mask_paths = [
+        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/New/250_flip",
+        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/New/250_color",
+        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/New/250_crop",
+        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/New/250_crop_color",
+        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/New/250"
+    ]
 
-    output_folder = "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/new_data/M1S1/M1S1_1_P_U1-GR2020/"
+    output_folder = "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/ensemble_97"
     main(mask_paths, output_folder)
