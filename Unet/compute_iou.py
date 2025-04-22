@@ -46,8 +46,8 @@ def compute_multiclass_iou(mask_dir, pred_dir, num_classes, threshold=0.5):
     return mean_iou
 
 # Example usage:
-mask_directory = "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/10X_clean/Validation_set"
-prediction_directory = "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/eval_3/Scaling/99/Validation_set"
+mask_directory = "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/domain_adaptation/general"
+prediction_directory = "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/eval_4/pseudo/97_h_color_2/general"
 num_classes = 3  # Adjust this number based on the number of classes in your masks
 mean_iou = compute_multiclass_iou(mask_directory, prediction_directory, num_classes)
 print(f"Mean IoU: ", mean_iou)

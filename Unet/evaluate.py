@@ -4,7 +4,6 @@ from tqdm import tqdm
 import wandb
 import random
 
-from utils.dice_score import multiclass_dice_coeff, dice_coeff
 from utils.iou_score import iou_score
 from torchvision.transforms import Resize
 
@@ -13,7 +12,6 @@ from torchvision.transforms import Resize
 def evaluate(net, dataloader, device, amp, global_index):
     net.eval()
     num_val_batches = len(dataloader)
-    dice_score = 0
     iou_score_total = 0
     iou_per_class = torch.zeros(net.n_classes, device='cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -33,17 +31,12 @@ def evaluate(net, dataloader, device, amp, global_index):
             if net.n_classes == 1:
                 assert mask_true.min() >= 0 and mask_true.max() <= 1, 'True mask indices should be in [0, 1]'
                 mask_pred = (F.sigmoid(mask_pred) > 0.5).float()
-                # compute the Dice score
-                dice_score += dice_coeff(mask_pred, mask_true, reduce_batch_first=False)
+
                 # compute the IOU score
                 iou_score_total += iou_score(mask_pred, mask_true, 2)
             else:
                 assert mask_true.min() >= 0 and mask_true.max() < net.n_classes, 'True mask indices should be in [0, n_classes['
-                # convert to one-hot format
-                mask_true_hot = F.one_hot(mask_true.squeeze(1), net.n_classes).permute(0, 3, 1, 2).float()
-                mask_pred_hot = F.one_hot(mask_pred.argmax(dim=1), net.n_classes).permute(0, 3, 1, 2).float()
-                # compute the Dice score, ignoring background
-                dice_score += multiclass_dice_coeff(mask_pred_hot[:, 1:], mask_true_hot[:, 1:], reduce_batch_first=False)
+        
                 # compute the IOU score (both mean and per class)
                 batch_iou_score, batch_iou_per_class = iou_score(mask_pred.argmax(dim=1), mask_true.squeeze(1), net.n_classes)
 
@@ -81,4 +74,4 @@ def evaluate(net, dataloader, device, amp, global_index):
     })
 
     net.train()
-    return dice_score / max(num_val_batches, 1), iou_score_total / max(num_val_batches, 1)
+    return iou_score_total / max(num_val_batches, 1)

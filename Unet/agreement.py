@@ -85,7 +85,7 @@ def main(folder_paths, dest_folder):
         print(f"File: {rel_path}, Overall Agreement Score: {score:.2f}")
 
         # Save if the score is above the threshold
-        if score > 0.97:
+        if score > 0.1:
             # Ensure the directory exists in dest_folder
             output_path = os.path.join(dest_folder, rel_path)
             output_dir = os.path.dirname(output_path)
@@ -99,12 +99,12 @@ def main(folder_paths, dest_folder):
 if __name__ == "__main__":
     # Example usage with five mask folder paths
     mask_paths = [
-        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/New/250_flip",
-        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/New/250_color",
-        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/New/250_crop",
-        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/New/250_crop_color",
-        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/New/250"
+        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/eval_3/250/flip/general",
+        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/eval_3/250/color/general",
+        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/eval_3/250/crop/general",
+        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/eval_3/250/no_aug/general",
+        "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/eval_3/250/rotate/general"
     ]
 
-    output_folder = "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/ensemble_97"
+    output_folder = "/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/eval_3/250/ensemble_rotate/general"
     main(mask_paths, output_folder)

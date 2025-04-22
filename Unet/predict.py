@@ -28,10 +28,10 @@ def predict_img(net,
     img = torch.as_tensor(img.copy()).float()
     # img = torch.from_numpy(img)
 
-    # # Add height data
-    # height_img = load_height(img_data)
-    # height_tensor = BasicDataset.preprocess_additional(height_img, size)
-    # img = torch.cat((img, height_tensor), dim=0)
+    # Add height data
+    height_img = load_height(img_data)
+    height_tensor = BasicDataset.preprocess_additional(height_img, size)
+    img = torch.cat((img, height_tensor), dim=0)
 
     # # Add light data
     # light_img = load_light(img_data)
@@ -153,7 +153,7 @@ if __name__ == '__main__':
     in_files = args.input
     out_files = args.output
 
-    net = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    net = UNet(n_channels=4, n_classes=args.classes, bilinear=args.bilinear)
     # net = UNet_3Plus(in_channels=5, n_classes = args.classes)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

@@ -26,10 +26,10 @@ from utils.focal_loss import focal_loss
 from unet_3.models.UNet_3Plus import UNet_3Plus
 
 train_img = Path('/storage/group/building_materials/raw/CONFOCAL_SAMPLES/')
-train_mask = Path('/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/ensemble_h_l_99')
+train_mask = Path('/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/10X_clean/Training_set')
 val_img = Path('/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/domain_adaptation/vk4/general')
 val_mask = Path('/usr/prakt/s0030/viktorkotsev_building_materials_ss2024/Unet/data/masks/10X_clean/Generalization_set')
-dir_checkpoint = Path('./checkpoints/New/99_color')
+dir_checkpoint = Path('./checkpoints/final/test_250_h')
 
 
 def train_model(
@@ -130,14 +130,13 @@ def train_model(
                     if model.n_classes == 1:
                         #loss = criterion(masks_pred.squeeze(1), true_masks.float())
                         loss = focal_loss(masks_pred.squeeze(1), true_masks, alpha=0.25, gamma=2, reduction='mean')
-                        loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
+                        #loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
                     else:
                         #loss = criterion(masks_pred, true_masks.squeeze(1))
                         loss = focal_loss(masks_pred, true_masks, alpha=class_weights, gamma=3, reduction='mean')
                         loss += dice_loss(
                             F.softmax(masks_pred, dim=1).float(),
-                            F.one_hot(true_masks.squeeze(1), model.n_classes).permute(0, 3, 1, 2).float(),
-                            multiclass=True
+                            true_masks
                         )
 
                 optimizer.zero_grad(set_to_none=True)
@@ -172,7 +171,7 @@ def train_model(
                         #     if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
                         #         histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
-                        val_dice, val_IoU = evaluate(model, val_loader, device, amp, global_index)
+                        val_IoU = evaluate(model, val_loader, device, amp, global_index)
                         global_index = (global_index + 1) % (len(val_loader) * batch_size)
                         #scheduler.step(val_score)
                         # Used for wandb imgs
@@ -181,10 +180,8 @@ def train_model(
                         else:
                             pred = masks_pred.argmax(dim=1)
 
-                        logging.info('Validation Dice score: {}'.format(val_dice))
                         logging.info('Validation IoU score: {}'.format(val_IoU))
                         experiment.log({
-                            'validation Dice': val_dice,
                             'validation IoU': val_IoU,
                             'images': { 
                                 'img': wandb.Image(images[0,:3,:,:].cpu()),
@@ -211,8 +208,8 @@ def parse_size(value: str) -> Union[int, Tuple[int, int]]:
     """
     try:
         if ',' in value:  # If the value contains a comma, treat it as a tuple
-            width, height = map(int, value.split(','))
-            return width, height
+            height, width = map(int, value.split(','))
+            return height, width
         else:  # Otherwise, parse it as a single integer
             return int(value)
     except ValueError:
@@ -246,7 +243,7 @@ if __name__ == '__main__':
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
 
-    model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    model = UNet(n_channels=4, n_classes=args.classes, bilinear=args.bilinear)
     #model = UNet_3Plus(in_channels=5, n_classes = args.classes)
     model = model.to(memory_format=torch.channels_last)
 
