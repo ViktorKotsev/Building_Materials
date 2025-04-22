@@ -15,6 +15,7 @@ import os
 import torchvision.transforms as transforms
 import random
 import torch.nn.functional as F
+from torchvision.transforms.functional import InterpolationMode
 
 import vk4extract
 
@@ -85,7 +86,7 @@ def load_light(filename):
 
 
 class BasicDataset(Dataset):
-    def __init__(self, images_dir: str, mask_dir: str, size: 256, mask_suffix: str = '', mode = 'train', height=False, light=False):
+    def __init__(self, images_dir: str, mask_dir: str, size: 256, mask_suffix: str = '', mode = 'train', height=True, light=False):
         self.images_dir = Path(images_dir)
         self.mask_dir = Path(mask_dir)
 
@@ -131,7 +132,7 @@ class BasicDataset(Dataset):
         # Convert airVoids to white and aggregates to gray
         if is_mask:
             mask = img.copy()
-            mask[(mask > 0) & (mask <= 128)] = 1
+            mask[(mask > 0) & (mask <= 128) & (mask != 100)] = 1
             mask[mask > 128] = 2
             # mask[mask == 128] = 1
             # mask[mask == 255] = 2
@@ -181,25 +182,56 @@ class BasicDataset(Dataset):
         mask = load_image(mask_file[0])
         img = load_image(img_file[0])
 
+        # # ---------------------------------------------
+        # # Square img if it is going to be rotated
+        # # ---------------------------------------------
+        # img = img.crop((20, 20, img.size[0] - 20, img.size[1] - 20))
+
+        # orig_width, orig_height = img.size  # PIL returns (width, height)
+       
+        # top = 0
+        # bottom = top + orig_height
+
+        # # Randomly pick a horizontal position
+        # max_left = orig_width - orig_height
+        # left = random.randint(0, max_left)
+        # right = left + orig_height  
+
+        # # Crop both img and mask
+        # img  = img.crop((left, top, right, bottom))
+        # mask = mask.crop((left, top, right, bottom))
+
+        # # !!!!!!!!!!!!!!!!!!!
+        # self.size = 384, 512
+        # # !!!!!!!!!!!!!!!!!!!!!
+
         # Crop 20 pixels to fit the masks
-        if self.mode == 'val':
-            img = img.crop((20, 20, img.size[0] - 20, img.size[1] - 20))
+        #if self.mode == 'val':
+        img = img.crop((20, 20, img.size[0] - 20, img.size[1] - 20))
         #mask = mask.crop((20, 20, mask.size[0] - 20, mask.size[1] - 20))
 
         if self.height:
             height_img = load_height(img_file[0])
-            if self.mode == 'val':
-                height_img = height_img.crop((20, 20, height_img.size[0] - 20, height_img.size[1] - 20))
+
+            #if self.mode == 'val':
+            height_img = height_img.crop((20, 20, height_img.size[0] - 20, height_img.size[1] - 20))
+            #height_img = height_img.crop((left, top, right, bottom))
 
         if self.light:
             light_img = load_light(img_file[0])
-            light_img = light_img.crop((20, 20, light_img.size[0] - 20, light_img.size[1] - 20))
+
+            if self.mode == 'val':
+                light_img = light_img.crop((20, 20, light_img.size[0] - 20, light_img.size[1] - 20))
+            #light_img = light_img.crop((left, top, right, bottom))
 
         assert img.size == mask.size, \
             f'Image and mask {name} should be the same size, but are {img.size} and {mask.size}'
 
         
         if self.mode == 'train':
+            # ---------------------------------------------
+            # 1) Random horizontal flip
+            # ---------------------------------------------
             if random.random() > 0.5:
                 img = img.transpose(Image.FLIP_LEFT_RIGHT)
                 mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
@@ -208,7 +240,9 @@ class BasicDataset(Dataset):
                 if self.light:
                     light_img = light_img.transpose(Image.FLIP_LEFT_RIGHT)
 
-            # Data augmentation: Random vertical flip
+            # ---------------------------------------------
+            # 2) Random vertical flip
+            # ---------------------------------------------
             if random.random() > 0.5:
                 img = img.transpose(Image.FLIP_TOP_BOTTOM)
                 mask = mask.transpose(Image.FLIP_TOP_BOTTOM)
@@ -217,29 +251,65 @@ class BasicDataset(Dataset):
                 if self.light:
                     light_img = light_img.transpose(Image.FLIP_TOP_BOTTOM)
 
-            # # Data augmentation: Random crop with varying sizes between 0.5 and 1.0 of the original image
+            # ---------------------------------------------
+            # 3) Random 90-degree rotations
+            # ---------------------------------------------
+            # # E.g. 50% chance to apply a 90-degree rotation
+            # if random.random() > 0.5:
+            #     # Randomly choose among 90, 180, or 270 degrees
+            #     angle_90 = random.choice([90, 180, 270])
+            #     img = img.rotate(angle_90, expand=True)
+            #     mask = mask.rotate(angle_90, expand=True)
+            #     if self.height:
+            #         height_img = height_img.rotate(angle_90, expand=True)
+            #     if self.light:
+            #         light_img = light_img.rotate(angle_90, expand=True)
+
+            # # ---------------------------------------------
+            # # 4) Random arbitrary rotation
+            # # ---------------------------------------------
+            # if random.random() > 0.5:
+            #     # Pick a random angle
+            #     angle = random.uniform(-45, 45)
+
+            #     # For a normal RGB image, bilinear or bicubic is typical
+            #     img = img.rotate(angle, resample=Image.BICUBIC, expand=True)
+
+            #     # For masks use nearest and fill with exclude value
+            #     mask = mask.rotate(angle, resample=Image.NEAREST, expand=True, fillcolor = 100)
+
+                
+            #     # For height or light maps, you may choose bilinear or nearest
+            #     # depending on whether they should be interpolated or not.
+            #     if self.height:
+            #         height_img = height_img.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor = 100)
+            #     if self.light:
+            #         light_img = light_img.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor = 100)
+
+            # # ---------------------------------------------
+            # # 5) Random crop with varying sizes
+            # # ---------------------------------------------
             # scale = random.uniform(0.5, 1.0)
             # width, height = img.size
             # new_width = int(scale * width)
             # new_height = int(scale * height)
 
-            # # Ensure the crop size is not larger than the image size
             # if new_width < width or new_height < height:
-            #     # Randomly select the top-left corner for cropping
             #     left = random.randint(0, width - new_width)
             #     top = random.randint(0, height - new_height)
             #     right = left + new_width
             #     bottom = top + new_height
 
-            #     # Crop both image and mask
             #     img = img.crop((left, top, right, bottom))
             #     mask = mask.crop((left, top, right, bottom))
             #     if self.height:
             #         height_img = height_img.crop((left, top, right, bottom))
             #     if self.light:
             #         light_img = light_img.crop((left, top, right, bottom))
-                
-            
+
+            # ---------------------------------------------
+            # 6) Adjust brightness, contrast, color, sharpness
+            # ---------------------------------------------
             # Adjust brightness
             if random.random() < 0.1:
                 enhancer = ImageEnhance.Brightness(img)
@@ -280,6 +350,32 @@ class BasicDataset(Dataset):
             light_tensor = self.preprocess_additional(light_img, self.size)
             img = torch.cat((img, light_tensor), dim=0)
 
+        # ---------------------------------------------
+        # 4) Random arbitrary rotation
+        # ---------------------------------------------
+
+        # # The arbitrary rotation is applied in the end because we want to preserve the relative scale of the objects
+        # if self.mode == 'train':
+        #     if random.random() > 0.5:
+        #         angle = random.uniform(-45, 45)
+
+        #         # Rotate image with bicubic (or bilinear) interpolation
+        #         img = transforms.functional.rotate(
+        #             img, 
+        #             angle=angle,
+        #             interpolation=InterpolationMode.BILINEAR,
+        #             fill=0 
+        #         )
+
+        #         # Rotate mask with nearest interpolation + fill
+        #         # Note: For single-channel mask, fill must be a single number (int).
+        #         #       For multi-channel mask, fill should be a tuple matching channels.
+        #         mask = transforms.functional.rotate(
+        #             mask.unsqueeze(0),
+        #             angle=angle,
+        #             interpolation=InterpolationMode.NEAREST,
+        #             fill=100
+        #         ).squeeze(0)
 
         data = {
             'image': img.float().contiguous(),

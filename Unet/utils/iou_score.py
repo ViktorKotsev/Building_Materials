@@ -4,17 +4,20 @@ import torch.nn.functional as F
 from torch import Tensor
 
 def iou_score(pred, target, num_classes):
-    iou = 0
+    class_iou = []
     for cls in range(num_classes):
         pred_cls = (pred == cls).float()
         target_cls = (target == cls).float()
         intersection = (pred_cls * target_cls).sum()
         union = pred_cls.sum() + target_cls.sum() - intersection
         if union == 0:
-            iou += torch.tensor(1.0)  # If there is no ground truth and prediction for this class
+            iou = torch.tensor(1.0)  # If there is no ground truth and prediction for this class
         else:
-            iou += intersection / union
-    return iou / num_classes
+            iou = intersection / union
+        class_iou.append(iou.item())
+    
+    mean_iou = sum(class_iou) / num_classes
+    return mean_iou, class_iou
 
 
 
